@@ -1,0 +1,41 @@
+name: Failure Monitor (Polling)
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  poll-and-extract:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout working repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Poll client repo for failures
+        env:
+          CLIENT_REPO_TOKEN: ${{ secrets.CLIENT_REPO_TOKEN }}
+          ES_ENDPOINT: ${{ secrets.ES_ENDPOINT }}
+          ES_API_KEY: ${{ secrets.ES_API_KEY }}
+        run: |
+          python scripts/fetch_failures.py \
+            --owner ${{ secrets.CLIENT_REPO_OWNER }} \
+            --repo ${{ secrets.CLIENT_REPO_NAME }}
+
+      - name: Upload failure reports as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: failure-reports-${{ github.run_id }}
+          path: data/failures/*.json
+          if-no-files-found: warn
