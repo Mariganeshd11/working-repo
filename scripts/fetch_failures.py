@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 """
-Poll a (possibly external, read-only) GitHub repository for recent
-workflow run failures, classify them, and push structured records
-into Elasticsearch. Designed to run on a schedule.
+Fetch GitHub Actions job/step results from a monitored repository,
+extract configuration failures, classify them, write structured JSON
+output, and push each record into Elasticsearch.
+
+Supports two modes:
+  - Polling mode (default): scans the most recent N runs
+  - Event-driven mode (--run-id): targets one specific run,
+    used when triggered by the webhook listener via repository_dispatch
 """
 
 import os
@@ -46,7 +51,7 @@ def api_headers(token: str) -> dict:
 
 
 def get_recent_runs(owner: str, repo: str, token: str, per_page: int = 20) -> list:
-    """Fetch the most recent workflow runs across the whole repo (not just one workflow file)."""
+    """Fetch the most recent workflow runs across the whole repo (polling mode)."""
     url = f"{GITHUB_API}/repos/{owner}/{repo}/actions/runs"
     resp = requests.get(url, headers=api_headers(token), params={"per_page": per_page})
     resp.raise_for_status()
@@ -103,7 +108,8 @@ def build_failure_record(owner, repo, run, job, log_text) -> dict:
 def push_to_elasticsearch(record: dict) -> bool:
     """Push a record into Elasticsearch using a deterministic document ID,
     so re-checking the same job never creates a duplicate — it just overwrites
-    the same document. This makes polling safe to run repeatedly."""
+    the same document. This makes both polling and event-driven triggering
+    safe to run repeatedly."""
     es_endpoint = os.environ.get("ES_ENDPOINT")
     es_api_key = os.environ.get("ES_API_KEY")
 
@@ -131,19 +137,25 @@ def push_to_elasticsearch(record: dict) -> bool:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Poll a repo for failed workflow runs and classify them")
+    parser = argparse.ArgumentParser(description="Fetch and classify failures from a monitored repo")
     parser.add_argument("--owner", required=True, help="Repository owner (e.g. the client's GitHub org/user)")
     parser.add_argument("--repo", required=True, help="Repository name to monitor")
     parser.add_argument("--per-page", type=int, default=20, help="How many recent runs to check each poll")
+    parser.add_argument("--run-id", type=int, help="Specific run ID (for event-driven triggering)")
     parser.add_argument("--output-dir", default="data/failures", help="Where to write local JSON copies")
     args = parser.parse_args()
 
-    # Uses a read-only token scoped to the monitored repo, NOT the default GITHUB_TOKEN
-    # (which only has access to the repo this workflow is running inside).
     token = get_env_or_die("CLIENT_REPO_TOKEN")
 
-    runs = get_recent_runs(args.owner, args.repo, token, per_page=args.per_page)
-    print(f"Checked {len(runs)} recent run(s) in {args.owner}/{args.repo}")
+    if args.run_id:
+        url = f"{GITHUB_API}/repos/{args.owner}/{args.repo}/actions/runs/{args.run_id}"
+        resp = requests.get(url, headers=api_headers(token))
+        resp.raise_for_status()
+        runs = [resp.json()]
+        print(f"Event-driven mode: targeting run #{args.run_id}")
+    else:
+        runs = get_recent_runs(args.owner, args.repo, token, per_page=args.per_page)
+        print(f"Polling mode: checked {len(runs)} recent run(s) in {args.owner}/{args.repo}")
 
     os.makedirs(args.output_dir, exist_ok=True)
     pushed_count = 0
@@ -166,11 +178,12 @@ def main():
             out_path = os.path.join(args.output_dir, f"run-{run['id']}-job-{job['id']}.json")
             with open(out_path, "w") as f:
                 json.dump(record, f, indent=2)
+            print(f"Wrote {out_path} ({len(record['detected_failures'])} failure pattern(s) matched)")
 
             if push_to_elasticsearch(record):
                 pushed_count += 1
 
-    print(f"Done. {pushed_count} failure record(s) pushed to Elasticsearch this poll.")
+    print(f"Done. {pushed_count} failure record(s) pushed to Elasticsearch.")
 
 
 if __name__ == "__main__":

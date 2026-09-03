@@ -1,9 +1,11 @@
-name: Failure Monitor (Polling)
+name: Failure Monitor (Event + Polling)
 
 on:
   schedule:
     - cron: '*/10 * * * *'
   workflow_dispatch:
+  repository_dispatch:
+    types: [client_repo_failure]
 
 permissions:
   contents: read
@@ -12,29 +14,30 @@ jobs:
   poll-and-extract:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout working repo
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - run: pip install -r requirements.txt
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Poll client repo for failures
+      - name: Process failure
         env:
           CLIENT_REPO_TOKEN: ${{ secrets.CLIENT_REPO_TOKEN }}
           ES_ENDPOINT: ${{ secrets.ES_ENDPOINT }}
           ES_API_KEY: ${{ secrets.ES_API_KEY }}
         run: |
-          python scripts/fetch_failures.py \
-            --owner ${{ secrets.CLIENT_REPO_OWNER }} \
-            --repo ${{ secrets.CLIENT_REPO_NAME }}
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            python scripts/fetch_failures.py \
+              --owner ${{ secrets.CLIENT_REPO_OWNER }} \
+              --repo ${{ secrets.CLIENT_REPO_NAME }} \
+              --run-id ${{ github.event.client_payload.run_id }}
+          else
+            python scripts/fetch_failures.py \
+              --owner ${{ secrets.CLIENT_REPO_OWNER }} \
+              --repo ${{ secrets.CLIENT_REPO_NAME }}
+          fi
 
-      - name: Upload failure reports as artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: failure-reports-${{ github.run_id }}
           path: data/failures/*.json
